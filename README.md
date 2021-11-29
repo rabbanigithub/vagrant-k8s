@@ -1,1 +1,1 @@
-# vagrant-k8s
+# Install Kubernetes using Vagrant
