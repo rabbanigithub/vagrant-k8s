@@ -1,0 +1,153 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+ #     - software-properties-common
+ #     - lsb-release
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add apt repository for Docker stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable
+      state: present
+
+  - name: Install Docker and its dependecies
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    notify:
+      - docker-status
+
+  - name: Configure the Docker daemon
+    copy:
+      src: daemon.json
+      dest: /etc/docker/daemon.json
+
+  - name: Restart Docker service
+    service:
+      name: docker
+      daemon_reload: yes
+      state: restarted
+
+  - name: Add vagrant user to docker group
+    user:
+      name: vagrant
+      group: docker
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Settings to load br_netfilter module during boot
+    shell: echo "br_netfilter" > /etc/modules-load.d/k8s.conf
+    
+  - name: Load br_netfilter module
+    shell: modprobe br_netfilter
+    
+  - name: Settings to load bridge module during boot
+    shell: printf "net.bridge.bridge-nf-call-ip6tables = 1\nnet.bridge.bridge-nf-call-iptables = 1" > /etc/sysctl.d/k8s.conf
+
+  - name: Load bridge module
+    shell: sysctl --system
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Add apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubernetes binaries
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+  - name: Configure node IP
+    shell: echo "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}" > /etc/default/kubelet
+
+  - name: Restart kubelet Service
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Initialize the Kubernetes cluster using kubeadm
+    command: kubeadm init --apiserver-advertise-address="10.11.12.30" --apiserver-cert-extra-sans="10.11.12.30"  --node-name controlplane --pod-network-cidr=10.244.0.0/16
+
+  - name: Setup kubeconfig for vagrant user
+    shell: "{{ item }}"
+    with_items:
+     - mkdir -p /home/vagrant/.kube
+     - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+     - chown vagrant:vagrant /home/vagrant/.kube/config
+
+  - name: Copy pod network file kube-flannel.yml
+    become: false
+    copy:
+      src: kube-flannel.yml
+      dest: /tmp/kube-flannel.yml
+
+  - name: Install flannel pod network
+    become: false
+    shell: kubectl apply -f /tmp/kube-flannel.yml
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+   
+  - name: Install bash-completion package
+    apt:
+      name: bash-completion
+      state: present
+      update_cache: yes
+
+  - name: Add autocomplete permanently to bash shell
+    become: false
+    shell: echo "source <(kubectl completion bash)" >> ~/.bashrc
+    
+  handlers:
+    - name: docker-status
+      service: name=docker state=started
